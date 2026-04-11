@@ -2,17 +2,43 @@
 
 A [Claude Code](https://claude.ai/code) skill that dispatches tasks from a TODO file into parallel development streams, each running in its own git worktree and tmux window.
 
-## What it does
+## The problem
+
+A typical Claude Code workflow looks like this: you write (or dictate) a list of tasks, hand them to Claude, wait for it to finish, run `/clear`, then feed it the next batch. If you want parallelism you open separate tmux windows manually — but then you can't dictate everything in one go, and you lose track of what's running where.
+
+## How this changes things
+
+1. You write a `TASKS.md` (or `TODO.md`) with everything you need done
+2. You tell Claude to dispatch — e.g. `/dispatch` or "run my tasks"
+3. The orchestrator reads the file, estimates complexity, and presents a plan:
 
 ```
-TODO.md → parse tasks → estimate complexity → select model → create worktrees → launch tmux → claude CLI
+Task                              | Model  | Branch
+----------------------------------+--------+---------------------
+Redesign auth architecture        | opus   | wt/redesign-auth
+Add pagination to user list       | sonnet | wt/add-pagination
+Fix typo in README                | haiku  | wt/fix-readme-typo
 ```
 
-1. **Parses** your TODO.md (checkbox, header-based, or tagged formats)
-2. **Estimates complexity** of each task and picks the right Claude model (Haiku / Sonnet / Opus)
+4. After your OK, it opens a tmux window for each task, each with its own Claude Code session and git worktree
+5. It waits for all sessions to finish, polling every 30s
+6. Once done, it merges each branch back, resolves simple conflicts automatically, and updates `TASKS.md` with results
+
+You save time, save tokens (smaller models handle simple tasks), and everything stays visible in one tmux session. No more switching between windows to check progress — the orchestrator tracks it for you.
+
+## What it does under the hood
+
+```
+TASKS.md → parse → estimate complexity → select model → create worktrees → launch tmux → claude CLI → poll → merge → report
+```
+
+1. **Parses** your task file (checkbox, header-based, or tagged formats)
+2. **Estimates complexity** and picks the right Claude model (Haiku / Sonnet / Opus)
 3. **Creates git worktrees** so each task works on an isolated branch
-4. **Launches tmux windows** with Claude Code sessions, one per task
-5. **Monitors** progress and helps you merge results back
+4. **Launches tmux windows** with interactive Claude Code sessions
+5. **Polls** until every session finishes
+6. **Merges** branches back, handles simple conflicts automatically
+7. **Reports** what was merged, what had issues, cleans up worktrees
 
 ## Installation
 
@@ -22,17 +48,6 @@ Copy `SKILL.md` into your Claude Code skills directory:
 mkdir -p ~/.claude/skills/task-orchestrator
 cp SKILL.md ~/.claude/skills/task-orchestrator/
 ```
-
-## Usage
-
-With the skill installed, tell Claude Code things like:
-
-- "run my tasks"
-- "orchestrate tasks from TODO.md"
-- "dispatch tasks in parallel"
-- "spin up worktrees for my TODO list"
-
-Claude will parse your TODO file, present a plan with model assignments, and launch everything after your confirmation.
 
 ## Task format examples
 
