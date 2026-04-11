@@ -288,14 +288,14 @@ NEW_COMMITS=$(git log "$BASE_BRANCH"..HEAD --oneline)
 HAS_BLOCKERS=$(test -f BLOCKERS.md && echo yes || echo no)
 ```
 
-- **New commits + no BLOCKERS.md** → task succeeded
-- **New commits + BLOCKERS.md** → partial success, flag for user review
-- **No new commits** → task failed or produced no changes, flag for user review
+- **New commits + no BLOCKERS.md** → task succeeded, proceed to merge automatically
+- **New commits + BLOCKERS.md** → partial success, note in final report but still merge
+- **No new commits** → task failed or produced no changes, skip and note in report
 
 ### Timeout
 
-If a task runs longer than **30 minutes**, warn the user and ask whether to
-keep waiting or kill it. Do not kill automatically.
+If a task runs longer than **30 minutes**, warn the user but keep waiting.
+Only ask about killing if it exceeds **60 minutes**. Do not kill automatically.
 
 ## Step 7: Merge Results
 
@@ -332,11 +332,12 @@ done
 
 ### Conflict handling
 
-If a merge conflicts:
-1. **Stop the merge loop** — do not continue to the next branch
-2. Show the conflicted files and the relevant diff hunks
-3. Ask the user how to proceed: resolve now, skip this branch, or abort
-4. After resolution, `git merge --continue` and proceed with remaining branches
+**Simple conflicts** (e.g. adjacent import lines, whitespace, non-overlapping changes
+in the same file): resolve automatically, commit, and continue. No need to ask.
+
+**Complex conflicts** (semantic overlap, same function modified differently, architectural
+disagreements between branches): stop the merge loop, show the conflicted files and
+diff hunks, and ask the user how to proceed.
 
 ### Post-merge summary
 
