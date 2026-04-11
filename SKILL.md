@@ -277,64 +277,103 @@ shift 2
 # Remaining args: pairs of "window_name:model:worktree_path"
 TASKS=("$@")
 
+# Elapsed time tracking
+START_TIME=$(date +%s)
+
+elapsed_for() {
+  local start=$1
+  local now=$(date +%s)
+  local diff=$((now - start))
+  printf "%dm%02ds" $((diff / 60)) $((diff % 60))
+}
+
+# Per-task start times and finish times
+declare -A TASK_START TASK_END
+for entry in "${TASKS[@]}"; do
+  IFS=':' read -r WINDOW _ _ <<< "$entry"
+  TASK_START[$WINDOW]=$START_TIME
+done
+
 while true; do
   clear
-  echo "╔══════════════════════════════════════════════════════════════════╗"
-  echo "║  TASK ORCHESTRATOR MONITOR                    $(date +%H:%M:%S)        ║"
-  echo "╠══════════════════════════════════════════════════════════════════╣"
-  printf "║  %-3s  %-28s %-8s %-18s ║\n" "#" "TASK" "MODEL" "STATUS"
-  echo "╠══════════════════════════════════════════════════════════════════╣"
+  ELAPSED=$(elapsed_for $START_TIME)
+  echo "══════════════════════════════════════════════════════════════"
+  echo "  TASK MONITOR   $(date +%H:%M:%S)   elapsed: $ELAPSED"
+  echo "══════════════════════════════════════════════════════════════"
 
   ALL_DONE=true
-  IDX=1
+  NEEDS_INPUT_LIST=""
 
   for entry in "${TASKS[@]}"; do
     IFS=':' read -r WINDOW MODEL WTPATH <<< "$entry"
+    echo ""
 
     # Check if claude is still running
     CMD=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_current_command}' 2>/dev/null)
 
     if [ "$CMD" = "claude" ]; then
-      # Try to detect if waiting for user input
-      CAPTURE=$(tmux capture-pane -t "$SESSION:$WINDOW" -p 2>/dev/null | tail -5)
-      if echo "$CAPTURE" | grep -qiE '(Y/n|y/N|\? |permission|allow|approve|deny)'; then
-        STATUS="!! NEEDS INPUT"
-      else
-        STATUS=".. working"
-      fi
       ALL_DONE=false
+      TASK_ELAPSED=$(elapsed_for ${TASK_START[$WINDOW]})
+
+      # Try to detect if waiting for user input
+      CAPTURE=$(tmux capture-pane -t "$SESSION:$WINDOW" -p 2>/dev/null | tail -8)
+      if echo "$CAPTURE" | grep -qiE '(Y/n|y/N|\? |permission|allow|approve|deny)'; then
+        echo "  !! $WINDOW  [$MODEL]  NEEDS INPUT  ($TASK_ELAPSED)"
+        # Show what it's asking
+        QUESTION=$(echo "$CAPTURE" | grep -iE '(Y/n|y/N|\? |permission|allow|approve|deny)' | tail -1)
+        [ -n "$QUESTION" ] && echo "     $QUESTION"
+        NEEDS_INPUT_LIST="$NEEDS_INPUT_LIST $WINDOW"
+      else
+        echo "  .. $WINDOW  [$MODEL]  working  ($TASK_ELAPSED)"
+        # Show last activity hint from capture
+        LAST_LINE=$(echo "$CAPTURE" | grep -E '(Bash|Read|Edit|Write|Grep|Glob)\(' | tail -1)
+        [ -n "$LAST_LINE" ] && echo "     $LAST_LINE"
+      fi
+
     elif [ -z "$CMD" ]; then
-      STATUS="?? window gone"
+      echo "  ?? $WINDOW  [$MODEL]  window gone"
+
     else
-      # Claude exited — check result
+      # Claude exited — record finish time once
+      [ -z "${TASK_END[$WINDOW]}" ] && TASK_END[$WINDOW]=$(date +%s)
+      TASK_ELAPSED=$(elapsed_for ${TASK_START[$WINDOW]})
+      # Adjust elapsed to use finish time
+      TASK_ELAPSED_DONE=$(( ${TASK_END[$WINDOW]} - ${TASK_START[$WINDOW]} ))
+      TASK_ELAPSED=$(printf "%dm%02ds" $((TASK_ELAPSED_DONE / 60)) $((TASK_ELAPSED_DONE % 60)))
+
       if [ -d "$WTPATH" ]; then
-        COMMITS=$(git -C "$WTPATH" log "$BASE_BRANCH"..HEAD --oneline 2>/dev/null | wc -l)
-        if [ "$COMMITS" -gt 0 ]; then
+        COMMITS=$(git -C "$WTPATH" log "$BASE_BRANCH"..HEAD --oneline 2>/dev/null)
+        COMMIT_COUNT=$(echo "$COMMITS" | grep -c . 2>/dev/null || echo 0)
+        if [ "$COMMIT_COUNT" -gt 0 ]; then
+          LAST_MSG=$(echo "$COMMITS" | head -1)
           if [ -f "$WTPATH/BLOCKERS.md" ]; then
-            STATUS="~~ done (blockers)"
+            echo "  ~~ $WINDOW  [$MODEL]  done with blockers  ($TASK_ELAPSED)"
           else
-            STATUS="OK done ($COMMITS commits)"
+            echo "  OK $WINDOW  [$MODEL]  done, $COMMIT_COUNT commits  ($TASK_ELAPSED)"
           fi
+          echo "     last: $LAST_MSG"
+          # Show files changed
+          FILES=$(git -C "$WTPATH" diff --stat "$BASE_BRANCH"..HEAD 2>/dev/null | tail -1)
+          [ -n "$FILES" ] && echo "     $FILES"
         else
-          STATUS="-- no changes"
+          echo "  -- $WINDOW  [$MODEL]  finished, no changes  ($TASK_ELAPSED)"
         fi
       else
-        STATUS="OK merged"
+        echo "  OK $WINDOW  [$MODEL]  merged  ($TASK_ELAPSED)"
       fi
     fi
-
-    printf "║  %-3s  %-28s %-8s %-18s ║\n" "$IDX" "$WINDOW" "$MODEL" "$STATUS"
-    IDX=$((IDX + 1))
   done
 
-  echo "╠══════════════════════════════════════════════════════════════════╣"
-  echo "║  Jump to task: press prefix then <number>                      ║"
-  echo "║  !! = needs your input — switch to that window                 ║"
-  echo "╚══════════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "──────────────────────────────────────────────────────────────"
+  if [ -n "$NEEDS_INPUT_LIST" ]; then
+    echo "  !! Switch to:$NEEDS_INPUT_LIST"
+  fi
+  echo "  prefix+<n> to jump to window, prefix+s to select"
 
   if $ALL_DONE; then
     echo ""
-    echo "All tasks finished. Returning to orchestrator..."
+    echo "  All tasks finished. Returning to orchestrator..."
     exit 0
   fi
 
@@ -372,12 +411,10 @@ return partial or empty content. The monitor uses it as a best-effort heuristic:
 
 ### Navigation
 
-The user stays in the monitor window and can jump to any task window using
-tmux's standard window switching (prefix + window number, or prefix + n/p).
-The monitor shows the task number corresponding to the tmux window index.
-
-After switching to a task window to provide input, the user returns to the
-monitor with prefix + selecting the monitor window.
+The user stays in the monitor window and jumps to task windows using tmux's
+standard window switching (prefix + window number, or prefix + s to select
+from a list). The monitor names match tmux window names so it's easy to find
+the right one.
 
 ## Step 7: Wait for Completion
 
