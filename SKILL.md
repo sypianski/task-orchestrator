@@ -254,30 +254,111 @@ Instructions:
 - If you encounter blockers or ambiguity, write them to BLOCKERS.md instead of guessing
 ```
 
-## Step 6: Monitor and Report
+## Step 6: Wait for Completion
 
-After launching all sessions, provide the user with:
+After launching all sessions, **poll until every subagent finishes**.
+Do NOT hand off monitoring to the user — the orchestrator owns the full lifecycle.
 
-1. **How to check status:**
-   ```
-   tmux attach -t <session-name>
-   ```
-   Navigate windows with `Ctrl-b n` (next) and `Ctrl-b p` (previous).
+### Polling loop
 
-2. **How to check all worktrees:**
-   ```
-   git worktree list
-   ```
+Check every 30 seconds whether each window's process is still `claude`:
 
-3. **After tasks complete — merge workflow:**
-   ```bash
-   # For each completed worktree:
-   git checkout main
-   git merge wt/<slug>
-   # Resolve conflicts if any
-   git worktree remove ../worktrees/wt-<slug>
-   git branch -d wt/<slug>
-   ```
+```bash
+for window in "${TASK_WINDOWS[@]}"; do
+  CMD=$(tmux list-panes -t "$SESSION_NAME:$window" -F '#{pane_current_command}')
+  if [ "$CMD" = "fish" ] || [ "$CMD" = "bash" ]; then
+    # claude exited — this task is done
+  fi
+done
+```
+
+While waiting, print a compact status update each cycle so the user sees progress:
+
+```
+[12:03:42] ⏳ redesign-auth (opus)  |  ✅ add-pagination  |  ✅ fix-readme-typo
+```
+
+### Detecting success vs failure
+
+After claude exits in a window, check for new commits on the worktree branch:
+
+```bash
+cd <worktree-path>
+NEW_COMMITS=$(git log "$BASE_BRANCH"..HEAD --oneline)
+HAS_BLOCKERS=$(test -f BLOCKERS.md && echo yes || echo no)
+```
+
+- **New commits + no BLOCKERS.md** → task succeeded
+- **New commits + BLOCKERS.md** → partial success, flag for user review
+- **No new commits** → task failed or produced no changes, flag for user review
+
+### Timeout
+
+If a task runs longer than **30 minutes**, warn the user and ask whether to
+keep waiting or kill it. Do not kill automatically.
+
+## Step 7: Merge Results
+
+Once **all** tasks are done (or the user decides to proceed with completed ones),
+merge each successful branch back into the base branch.
+
+### Merge order
+
+1. Sort tasks by number of files changed (fewest first) to minimize conflict surface
+2. Merge one at a time, checking for conflicts after each
+
+### Merge procedure
+
+```bash
+# Return to the main project directory (not a worktree)
+cd <project-root>
+git checkout "$BASE_BRANCH"
+
+for slug in "${COMPLETED_SLUGS[@]}"; do
+  echo "Merging wt/$slug..."
+  if git merge "wt/$slug" --no-edit; then
+    echo "✅ wt/$slug merged"
+    git worktree remove "../worktrees/wt-$slug"
+    git branch -d "wt/$slug"
+  else
+    echo "⚠️  Conflict merging wt/$slug — stopping for user review"
+    # Show conflicted files
+    git diff --name-only --diff-filter=U
+    # Ask user to resolve, then continue
+    break
+  fi
+done
+```
+
+### Conflict handling
+
+If a merge conflicts:
+1. **Stop the merge loop** — do not continue to the next branch
+2. Show the conflicted files and the relevant diff hunks
+3. Ask the user how to proceed: resolve now, skip this branch, or abort
+4. After resolution, `git merge --continue` and proceed with remaining branches
+
+### Post-merge summary
+
+After all merges, print a final report:
+
+```
+Merge complete:
+  ✅ wt/fix-readme-typo     — merged (1 file changed)
+  ✅ wt/add-pagination       — merged (4 files changed)
+  ⚠️  wt/redesign-auth       — conflicts resolved manually
+  ❌ wt/add-caching          — no changes produced, skipped
+
+Remaining worktrees: none
+```
+
+## Step 8: Report
+
+Provide the user with:
+
+1. **Summary** of what was merged and any issues encountered
+2. **How to review** the combined result: `git log --oneline -10`
+3. **Cleanup confirmation** — all worktrees and branches removed for merged tasks
 
 ## Edge Cases
 
