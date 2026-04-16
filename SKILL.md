@@ -25,13 +25,32 @@ This skill turns a TODO file into parallel development streams:
 TODO.md → parse tasks → estimate complexity → create worktrees → launch tmux → claude CLI → monitor → merge
 ```
 
-## Step 1: Locate and Parse the Task File
+## Step 1: Collect Tasks
 
-Look for a task file in the current project. Check these paths in order:
+Tasks can come from two sources. **The user's prompt takes priority** — only
+fall back to a TODO file when no tasks are given inline.
+
+### Source A: Tasks from the prompt (preferred)
+
+If the user includes tasks directly in their message (as a list, bullet points,
+or prose describing multiple work items), parse those as the task list and skip
+the TODO file entirely. Apply the same parsing rules below (model tags, branch
+hints, etc.).
+
+### Source B: TODO file (fallback)
+
+Only when the prompt contains **no inline tasks**, look for a task file:
 - Path explicitly provided by the user
 - `TODO.md` in the project root
 - `docs/TODO.md`
 - Any file matching `*TODO*` or `*tasks*` in root
+
+**Before dispatching TODO.md tasks, verify they are still relevant.** For each
+uncompleted task in the file:
+1. Check if the described change already exists in the codebase (grep for key
+   identifiers, check if referenced files/functions exist, review recent git log).
+2. If the task appears already accomplished, mark it `[x]` in the file and skip it.
+3. Only dispatch tasks that are genuinely outstanding.
 
 ### Supported Formats
 
@@ -161,8 +180,10 @@ For each task, create a worktree from the current branch:
 # Get current branch as base
 BASE_BRANCH=$(git branch --show-current)
 
-# For each task, create a worktree
-git worktree add ../worktrees/wt-<slug> -b wt/<slug> $BASE_BRANCH
+# For each task, create a worktree INSIDE the project in .worktrees/
+mkdir -p .worktrees
+grep -qxF '.worktrees/' .gitignore 2>/dev/null || echo '.worktrees/' >> .gitignore
+git worktree add .worktrees/<slug> -b wt/<slug> $BASE_BRANCH
 ```
 
 ### Branch Naming
@@ -178,8 +199,13 @@ If a branch or worktree already exists, ask the user whether to reuse or recreat
 
 ### Worktree Location
 
-Place worktrees in `../worktrees/` relative to the project root, keeping the main
-working directory clean. Create the directory if it doesn't exist.
+Place worktrees in `.worktrees/` **inside** the project root — keep everything
+for one project in a single folder instead of spawning a sibling directory.
+Create the directory if it doesn't exist, and add `.worktrees/` to `.gitignore`
+so the main repo doesn't try to track nested worktree contents.
+
+Do **not** use `../worktrees/` or `../<project>.worktrees/` — those scatter
+project state across sibling directories and clutter the parent folder.
 
 ## Step 5: Launch tmux Windows
 
@@ -201,10 +227,12 @@ or intervene. **Use the interactive flow instead:**
 1. **Write the prompt to a file in the worktree** (e.g. `.task-prompt.md`).
 2. **Launch the full `claude` command with explicit flags** — do NOT rely on
    personal shell aliases like `cc`, they may not exist on every machine and
-   obscure what's happening. Wait a few seconds for the TUI to initialise:
+   obscure what's happening. Append `; touch .expedi.done` so the worktree
+   gets a completion marker the moment claude exits (the orchestrator polls
+   for these in Step 7). Wait a few seconds for the TUI to initialise:
    ```bash
    tmux send-keys -t "$SESSION_NAME:<window>" \
-     "claude --dangerously-skip-permissions --model <haiku|sonnet|opus>" Enter
+     "claude --dangerously-skip-permissions --model <haiku|sonnet|opus>; touch .expedi.done" Enter
    sleep 5
    ```
 3. **Paste the prompt via the tmux buffer** (plain `paste-buffer` without
@@ -256,186 +284,79 @@ Instructions:
 
 ## Step 6: Launch Monitor Window
 
-Before starting the polling loop, create a dedicated monitor window that gives the
-user a live dashboard of all tasks. This is the **first window created** — it stays
-in the foreground so the user sees progress without switching between task windows.
+Before starting the polling loop, create a dedicated monitor window that runs
+`expedi-rigardi -w` — a Fish function that renders a live table of every
+`/expedi`-dispatched task in the session. This is the **first window created**;
+it stays in the foreground so the user sees progress without switching windows.
 
 ```bash
-tmux new-window -t "$SESSION_NAME" -n "monitor"
+tmux new-window -t "$SESSION_NAME" -n "monitor" 'fish -c "expedi-rigardi -w"'
 ```
 
-### Monitor script
+That's it. No per-project `.task-monitor.sh` to write — `expedi-rigardi` is
+installed globally (`~/fish/functions/expedi-rigardi.fish`) and auto-discovers
+tasks by scanning tmux panes whose `pane_current_path` matches
+`*/.worktrees/*` (or the legacy `*/worktrees/wt-*`).
 
-Write a bash script to the project root (`.task-monitor.sh`) and run it in the
-monitor window. The script loops every 10 seconds and redraws the dashboard.
+### What the monitor shows
 
-```bash
-#!/usr/bin/env bash
-SESSION="$1"
-BASE_BRANCH="$2"
-shift 2
-# Remaining args: pairs of "window_name:model:worktree_path"
-TASKS=("$@")
-
-# Elapsed time tracking
-START_TIME=$(date +%s)
-
-elapsed_for() {
-  local start=$1
-  local now=$(date +%s)
-  local diff=$((now - start))
-  printf "%dm%02ds" $((diff / 60)) $((diff % 60))
-}
-
-# Per-task start times and finish times
-declare -A TASK_START TASK_END
-for entry in "${TASKS[@]}"; do
-  IFS=':' read -r WINDOW _ _ <<< "$entry"
-  TASK_START[$WINDOW]=$START_TIME
-done
-
-while true; do
-  clear
-  ELAPSED=$(elapsed_for $START_TIME)
-  echo "══════════════════════════════════════════════════════════════"
-  echo "  TASK MONITOR   $(date +%H:%M:%S)   elapsed: $ELAPSED"
-  echo "══════════════════════════════════════════════════════════════"
-
-  ALL_DONE=true
-  NEEDS_INPUT_LIST=""
-
-  for entry in "${TASKS[@]}"; do
-    IFS=':' read -r WINDOW MODEL WTPATH <<< "$entry"
-    echo ""
-
-    # Check if claude is still running
-    CMD=$(tmux list-panes -t "$SESSION:$WINDOW" -F '#{pane_current_command}' 2>/dev/null)
-
-    if [ "$CMD" = "claude" ]; then
-      ALL_DONE=false
-      TASK_ELAPSED=$(elapsed_for ${TASK_START[$WINDOW]})
-
-      # Try to detect if waiting for user input
-      CAPTURE=$(tmux capture-pane -t "$SESSION:$WINDOW" -p 2>/dev/null | tail -8)
-      if echo "$CAPTURE" | grep -qiE '(Y/n|y/N|\? |permission|allow|approve|deny)'; then
-        echo "  !! $WINDOW  [$MODEL]  NEEDS INPUT  ($TASK_ELAPSED)"
-        # Show what it's asking
-        QUESTION=$(echo "$CAPTURE" | grep -iE '(Y/n|y/N|\? |permission|allow|approve|deny)' | tail -1)
-        [ -n "$QUESTION" ] && echo "     $QUESTION"
-        NEEDS_INPUT_LIST="$NEEDS_INPUT_LIST $WINDOW"
-      else
-        echo "  .. $WINDOW  [$MODEL]  working  ($TASK_ELAPSED)"
-        # Show last activity hint from capture
-        LAST_LINE=$(echo "$CAPTURE" | grep -E '(Bash|Read|Edit|Write|Grep|Glob)\(' | tail -1)
-        [ -n "$LAST_LINE" ] && echo "     $LAST_LINE"
-      fi
-
-    elif [ -z "$CMD" ]; then
-      echo "  ?? $WINDOW  [$MODEL]  window gone"
-
-    else
-      # Claude exited — record finish time once
-      [ -z "${TASK_END[$WINDOW]}" ] && TASK_END[$WINDOW]=$(date +%s)
-      TASK_ELAPSED=$(elapsed_for ${TASK_START[$WINDOW]})
-      # Adjust elapsed to use finish time
-      TASK_ELAPSED_DONE=$(( ${TASK_END[$WINDOW]} - ${TASK_START[$WINDOW]} ))
-      TASK_ELAPSED=$(printf "%dm%02ds" $((TASK_ELAPSED_DONE / 60)) $((TASK_ELAPSED_DONE % 60)))
-
-      if [ -d "$WTPATH" ]; then
-        COMMITS=$(git -C "$WTPATH" log "$BASE_BRANCH"..HEAD --oneline 2>/dev/null)
-        COMMIT_COUNT=$(echo "$COMMITS" | grep -c . 2>/dev/null || echo 0)
-        if [ "$COMMIT_COUNT" -gt 0 ]; then
-          LAST_MSG=$(echo "$COMMITS" | head -1)
-          if [ -f "$WTPATH/BLOCKERS.md" ]; then
-            echo "  ~~ $WINDOW  [$MODEL]  done with blockers  ($TASK_ELAPSED)"
-          else
-            echo "  OK $WINDOW  [$MODEL]  done, $COMMIT_COUNT commits  ($TASK_ELAPSED)"
-          fi
-          echo "     last: $LAST_MSG"
-          # Show files changed
-          FILES=$(git -C "$WTPATH" diff --stat "$BASE_BRANCH"..HEAD 2>/dev/null | tail -1)
-          [ -n "$FILES" ] && echo "     $FILES"
-        else
-          echo "  -- $WINDOW  [$MODEL]  finished, no changes  ($TASK_ELAPSED)"
-        fi
-      else
-        echo "  OK $WINDOW  [$MODEL]  merged  ($TASK_ELAPSED)"
-      fi
-    fi
-  done
-
-  echo ""
-  echo "──────────────────────────────────────────────────────────────"
-  if [ -n "$NEEDS_INPUT_LIST" ]; then
-    echo "  !! Switch to:$NEEDS_INPUT_LIST"
-  fi
-  echo "  prefix+<n> to jump to window, prefix+s to select"
-
-  if $ALL_DONE; then
-    echo ""
-    echo "  All tasks finished. Returning to orchestrator..."
-    exit 0
-  fi
-
-  sleep 10
-done
-```
-
-### Launching the monitor
-
-```bash
-chmod +x .task-monitor.sh
-
-# Build the task entries as "window:model:worktree_path" pairs
-TASK_ARGS=()
-for i in "${!TASK_WINDOWS[@]}"; do
-  TASK_ARGS+=("${TASK_WINDOWS[$i]}:${TASK_MODELS[$i]}:${TASK_WORKTREES[$i]}")
-done
-
-tmux send-keys -t "$SESSION_NAME:monitor" \
-  "bash .task-monitor.sh '$SESSION_NAME' '$BASE_BRANCH' ${TASK_ARGS[*]}" Enter
-```
-
-### Detecting "needs input"
-
-The monitor captures the last 5 lines of each task pane and looks for input
-prompts (`Y/n`, `permission`, `allow`, `approve`). This catches Claude Code's
-permission dialogs. When detected, the status shows `!! NEEDS INPUT` to alert
-the user to switch to that window.
-
-Since Claude Code uses the alternate screen buffer, `capture-pane -p` may
-return partial or empty content. The monitor uses it as a best-effort heuristic:
-- If capture works and matches input patterns → `!! NEEDS INPUT`
-- If capture is empty but `pane_current_command` is `claude` → `.. working`
-- Trust `pane_current_command` over capture content for running/finished state
+- States: `awaiting-input` (!), `working` (●), `interrupted` (✗), `idle` (○), `done` (✓)
+- Age since last activity (from the `Notification` hook at `~/dotfiles/hooks/cc-monitor-notify.sh`)
+- The prompt question when a task is awaiting input
+- Sorted: awaiting-input > working > interrupted > idle > done
 
 ### Navigation
 
 The user stays in the monitor window and jumps to task windows using tmux's
 standard window switching (prefix + window number, or prefix + s to select
-from a list). The monitor names match tmux window names so it's easy to find
-the right one.
+from a list).
 
 ## Step 7: Wait for Completion
 
-The orchestrator polls alongside the monitor (or relies on the monitor script's
-exit as the signal). **The monitor script exits with 0 when all tasks finish.**
+The orchestrator is a Claude Code instance — it cannot run an unbounded
+background loop, because once its last tool call returns it goes idle waiting
+for user input. The fix is a **bounded** bash poll that blocks inside a single
+Bash tool call, then re-invokes itself until all children have dropped their
+`.expedi.done` markers (written in Step 5).
 
 ### Orchestrator polling
 
-The orchestrator's own polling loop checks the monitor process:
+Issue this as **one Bash call** per cycle. It exits 0 when all markers are
+present, non-zero on the ~9-minute timeout. If it times out, call it again.
+When it exits 0 → proceed to merge.
 
 ```bash
-# Wait for monitor to exit (= all tasks done)
-MONITOR_PID=$(tmux list-panes -t "$SESSION_NAME:monitor" -F '#{pane_pid}')
-while kill -0 "$MONITOR_PID" 2>/dev/null; do
+# TASK_WORKTREES is the array of worktree paths from Step 5.
+# Bounded ~9 min so the Bash tool's 10-min ceiling never fires.
+DEADLINE=$(( $(date +%s) + 540 ))
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+  ALL_DONE=true
+  for WT in "${TASK_WORKTREES[@]}"; do
+    [ -f "$WT/.expedi.done" ] || { ALL_DONE=false; break; }
+  done
+  if $ALL_DONE; then
+    echo "all tasks done"
+    exit 0
+  fi
   sleep 15
 done
+echo "timeout — rerun to keep waiting"
+exit 1
 ```
 
-Alternatively, the orchestrator can poll independently using the same
-`pane_current_command` check as before — the monitor is a convenience for
-the user, not a dependency for the orchestrator logic.
+Once all markers are present, kill the monitor window before moving to merge:
+
+```bash
+tmux kill-window -t "$SESSION_NAME:monitor" 2>/dev/null
+```
+
+### Why markers instead of `pane_current_command`
+
+`pane_current_command` worked for the dashboard but is racy for completion
+detection: between claude exiting and the shell prompt redrawing, the value
+can briefly read as `bash`/`fish` even while claude is still live. A filesystem
+marker written after claude exits is atomic and persists across orchestrator
+restarts.
 
 ### Detecting success vs failure
 
@@ -477,7 +398,7 @@ for slug in "${COMPLETED_SLUGS[@]}"; do
   echo "Merging wt/$slug..."
   if git merge "wt/$slug" --no-edit; then
     echo "✅ wt/$slug merged"
-    git worktree remove "../worktrees/wt-$slug"
+    git worktree remove ".worktrees/$slug"
     git branch -d "wt/$slug"
   else
     echo "⚠️  Conflict merging wt/$slug — stopping for user review"
