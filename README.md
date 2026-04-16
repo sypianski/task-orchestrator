@@ -1,6 +1,8 @@
-# Task Orchestrator
+# Taskestro
 
 A [Claude Code](https://claude.ai/code) skill that dispatches tasks from a TODO file into parallel development streams, each running in its own git worktree and tmux window.
+
+> **Name.** *Taskestro* is Esperanto — `tasko` ("task") + `-estro` ("chief, master"). Literally: *taskmaster*. The skill itself is still registered with Claude Code as `task-orchestrator`; only the project / repo uses the Esperanto name.
 
 ## The problem
 
