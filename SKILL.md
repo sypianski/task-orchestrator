@@ -227,12 +227,12 @@ or intervene. **Use the interactive flow instead:**
 1. **Write the prompt to a file in the worktree** (e.g. `.task-prompt.md`).
 2. **Launch the full `claude` command with explicit flags** — do NOT rely on
    personal shell aliases like `cc`, they may not exist on every machine and
-   obscure what's happening. Append `; touch .expedi.done` so the worktree
+   obscure what's happening. Append `; touch .task.done` so the worktree
    gets a completion marker the moment claude exits (the orchestrator polls
    for these in Step 7). Wait a few seconds for the TUI to initialise:
    ```bash
    tmux send-keys -t "$SESSION_NAME:<window>" \
-     "claude --dangerously-skip-permissions --model <haiku|sonnet|opus>; touch .expedi.done" Enter
+     "claude --dangerously-skip-permissions --model <haiku|sonnet|opus>; touch .task.done" Enter
    sleep 5
    ```
 3. **Paste the prompt via the tmux buffer** (plain `paste-buffer` without
@@ -285,18 +285,19 @@ Instructions:
 ## Step 6: Launch Monitor Window
 
 Before starting the polling loop, create a dedicated monitor window that runs
-`expedi-rigardi -w` — a Fish function that renders a live table of every
-`/expedi`-dispatched task in the session. This is the **first window created**;
+`task-monitor -w` — a Fish function that renders a live table of every
+dispatched task in the session. This is the **first window created**;
 it stays in the foreground so the user sees progress without switching windows.
 
 ```bash
-tmux new-window -t "$SESSION_NAME" -n "monitor" 'fish -c "expedi-rigardi -w"'
+tmux new-window -t "$SESSION_NAME" -n "monitor" 'fish -c "task-monitor -w"'
 ```
 
-That's it. No per-project `.task-monitor.sh` to write — `expedi-rigardi` is
-installed globally (`~/fish/functions/expedi-rigardi.fish`) and auto-discovers
-tasks by scanning tmux panes whose `pane_current_path` matches
-`*/.worktrees/*` (or the legacy `*/worktrees/wt-*`).
+That's it. No per-project `.task-monitor.sh` to write — `task-monitor` is
+the Fish function bundled with this skill at `scripts/task-monitor.fish`.
+Symlink it into your Fish function path (e.g. `~/.config/fish/functions/`)
+once; it auto-discovers tasks by scanning tmux panes whose `pane_current_path`
+matches `*/.worktrees/*` (or the legacy `*/worktrees/wt-*`).
 
 ### What the monitor shows
 
@@ -317,7 +318,7 @@ The orchestrator is a Claude Code instance — it cannot run an unbounded
 background loop, because once its last tool call returns it goes idle waiting
 for user input. The fix is a **bounded** bash poll that blocks inside a single
 Bash tool call, then re-invokes itself until all children have dropped their
-`.expedi.done` markers (written in Step 5).
+`.task.done` markers (written in Step 5).
 
 ### Orchestrator polling
 
@@ -332,7 +333,7 @@ DEADLINE=$(( $(date +%s) + 540 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   ALL_DONE=true
   for WT in "${TASK_WORKTREES[@]}"; do
-    [ -f "$WT/.expedi.done" ] || { ALL_DONE=false; break; }
+    [ -f "$WT/.task.done" ] || { ALL_DONE=false; break; }
   done
   if $ALL_DONE; then
     echo "all tasks done"
