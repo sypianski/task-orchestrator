@@ -312,6 +312,20 @@ The user stays in the monitor window and jumps to task windows using tmux's
 standard window switching (prefix + window number, or prefix + s to select
 from a list).
 
+For interactive jump and per-pane actions, suggest **`task-pick`** — a
+companion fzf/TUI picker (`scripts/task-pick.fish`, symlinked into
+`~/dotfiles/fish/functions/`). It lists every pane in the session
+(expedi worktrees prioritised, other windows shown below), with these keys:
+
+- `enter` — jump to the selected pane's window
+- `ctrl-y` — send `1<Enter>` to accept the prompt without switching
+- `ctrl-l` — capture buffer into `less`
+- `ctrl-x` — kill the pane (with confirm)
+- `ctrl-t` — switch to full-screen TUI (j/k/enter/y/l/x/f/r/q)
+- `ctrl-r` — refresh
+
+Run `task-pick --tui` to skip fzf and go straight to the TUI mode.
+
 ## Step 7: Wait for Completion
 
 Parent claude cannot poll forever — once a tool call returns it goes idle until the next user input. Instead, **let the worktrees push completion events to the parent** via inotify + the `Monitor` tool. Each `.task.done` write emits one notification line, which Claude Code delivers to parent claude as a fresh turn.
